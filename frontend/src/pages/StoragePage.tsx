@@ -1,19 +1,26 @@
 import { useMemo, useState } from 'react'
-import type { Storage, StorageMethod } from '@/types'
+import type { Storage, StorageMethod, StorageMove, StorageMoveType } from '@/types'
 import { STORAGE_METHODS } from '@/types'
 import CabinetGrid from '@/components/common/CabinetGrid'
 import StatusTag from '@/components/common/StatusTag'
 import { usePersistentStore } from '@/hooks/usePersistentStore'
 import { specimenStore } from '@/stores/specimenStore'
-import { storageStore } from '@/stores/storageStore'
+import { storageStore, SlotConflictError } from '@/stores/storageStore'
 import { siteStore } from '@/stores/siteStore'
-import { encodeSlot, findSlotConflicts, specimenTaxon, storageSlotText } from '@/utils/codec'
+import { encodeSlot, formatDateTime, specimenTaxon, storageSlotText } from '@/utils/codec'
 import { uid } from '@/utils/id'
+
+const MOVE_TYPE_STYLE: Record<StorageMoveType, string> = {
+  入柜: 'border-field-200 bg-field-50 text-field-700',
+  挪柜: 'border-amber-200 bg-amber-50 text-amber-700',
+  出柜: 'border-slate-200 bg-slate-50 text-slate-500'
+}
 
 /** 保藏柜位图：柜-抽屉-盒-位三级展开，拖拽调整插位，重复占用给出提示 */
 export default function StoragePage(): JSX.Element {
   const specimens = usePersistentStore(specimenStore, (state) => state.rows)
   const storages = usePersistentStore(storageStore, (state) => state.rows)
+  const movesOf = usePersistentStore(storageStore, (state) => state.movesOf)
   const sites = usePersistentStore(siteStore, (state) => state.rows)
 
   const [cabinet, setCabinet] = useState('C01')
@@ -33,6 +40,8 @@ export default function StoragePage(): JSX.Element {
   const placedIds = useMemo(() => new Set(storages.map((item) => item.specimenId)), [storages])
   const unplaced = specimens.filter((item) => !placedIds.has(item.id))
 
+  const moveSlotText = (move: StorageMove): string => encodeSlot(move.cabinet, move.drawer, move.box, move.slot)
+
   const place = async (position: { cabinet: string; drawer: number; box: number; slot: number }): Promise<void> => {
     const specimenId = dragging ?? picked
     if (!specimenId) {
@@ -50,25 +59,38 @@ export default function StoragePage(): JSX.Element {
       storedDate: new Date().toISOString().slice(0, 10),
       handler: handler.trim()
     }
-    const conflicts = findSlotConflicts(storages, candidate)
-    if (conflicts.length > 0) {
-      setWarning(
-        `柜位 ${encodeSlot(position.cabinet, position.drawer, position.box, position.slot)} 已被占用：` +
-          conflicts.map((item) => `${codeOf(item.specimenId)}（${item.method}）`).join('、') +
-          '，请换一个插位或先出柜'
+    try {
+      const outcome = await storageStore.getState().save(candidate)
+      if (outcome === 'unchanged') {
+        setWarning('该标本已在当前柜位，未重复登记位置变化')
+        return
+      }
+      setWarning('')
+      setMessage(
+        outcome === '入柜'
+          ? `${codeOf(specimenId)} 已入柜 ${storageSlotText(candidate)}`
+          : `${codeOf(specimenId)} 已挪至 ${storageSlotText(candidate)}，位置变化已记录`
       )
-      return
+      setPicked('')
+      setDragging(null)
+      setDetail(null)
+    } catch (error) {
+      // 柜位冲突：当前位置与已有记录均未变化（事务整体回滚）
+      if (error instanceof SlotConflictError) {
+        const occupant = error.occupant
+        setWarning(
+          `柜位 ${storageSlotText(candidate)} 已被 ${codeOf(occupant.specimenId)}（${occupant.method}）占用，` +
+            '当前位置与历史记录均未改动，请换一个插位或先出柜'
+        )
+      } else {
+        throw error
+      }
     }
-    setWarning('')
-    await storageStore.getState().save(candidate)
-    setMessage(`${codeOf(specimenId)} 已入柜 ${storageSlotText(candidate)}`)
-    setPicked('')
-    setDragging(null)
   }
 
   const takeOut = async (storage: Storage): Promise<void> => {
-    await storageStore.getState().remove(storage.id)
-    setMessage(`${codeOf(storage.specimenId)} 已从 ${storageSlotText(storage)} 出柜`)
+    await storageStore.getState().remove(storage.id, handler)
+    setMessage(`${codeOf(storage.specimenId)} 已从 ${storageSlotText(storage)} 出柜，出柜时间与经手人已记录`)
     setDetail(null)
   }
 
@@ -187,6 +209,43 @@ export default function StoragePage(): JSX.Element {
                 {detail.handler || '—'}
               </p>
               <p className="text-xs text-slate-600">标本：{codeOf(detail.specimenId)}</p>
+              <div className="mt-2 flex gap-2">
+                <button
+                  className="btn-ghost"
+                  type="button"
+                  onClick={() => {
+                    setPicked(detail.specimenId)
+                    setDragging(null)
+                    setMessage(`已选中 ${codeOf(detail.specimenId)}，点击左侧任一空插位即可挪柜`)
+                  }}
+                >
+                  移位到其他插位
+                </button>
+                <button className="btn-danger" type="button" onClick={() => void takeOut(detail)}>
+                  出柜
+                </button>
+              </div>
+
+              <h3 className="mt-3 text-xs font-semibold text-slate-700">位置变化记录（近 → 远）</h3>
+              <ul className="mt-1.5 space-y-1.5">
+                {movesOf(detail.specimenId).map((move) => (
+                  <li key={move.id} className="rounded-lg border border-slate-200 px-2 py-1.5 text-xs">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className={`rounded border px-1.5 py-0.5 text-[11px] ${MOVE_TYPE_STYLE[move.type]}`}>
+                        {move.type}
+                      </span>
+                      <span className="text-slate-400">{formatDateTime(move.changedAt)}</span>
+                    </div>
+                    <p className="mt-1 font-mono text-field-700">{moveSlotText(move)}</p>
+                    <p className="text-slate-500">
+                      {move.method} · 经手人 {move.handler || '—'}
+                      {move.type === '出柜' ? ' · 出柜前所在柜位' : ''}
+                    </p>
+                  </li>
+                ))}
+                {movesOf(detail.specimenId).length === 0 ? <li className="text-xs text-slate-400">暂无位置变化记录</li> : null}
+              </ul>
+
               <button className="btn-ghost mt-2" type="button" onClick={() => setDetail(null)}>
                 关闭
               </button>

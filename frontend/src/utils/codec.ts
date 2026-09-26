@@ -81,6 +81,17 @@ export function findSlotConflicts(storages: Storage[], target: Storage): Storage
   return storages.filter((item) => item.id !== target.id && storageSlotText(item) === key)
 }
 
+/** ISO 时间戳转本地「YYYY-MM-DD HH:mm」展示 */
+export function formatDateTime(iso: string): string {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return iso
+  const pad = (value: number): string => String(value).padStart(2, '0')
+  return (
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ` +
+    `${pad(date.getHours())}:${pad(date.getMinutes())}`
+  )
+}
+
 /** 标本摘要文本 */
 export function specimenTaxon(specimen: Specimen): string {
   const parts = [specimen.order, specimen.family, specimen.genus, specimen.species].filter(Boolean)

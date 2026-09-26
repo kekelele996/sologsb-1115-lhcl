@@ -18,3 +18,27 @@ export interface Storage {
   storedDate: string
   handler: string
 }
+
+/** 位置变化类型：入柜 / 挪柜位 / 出柜 */
+export const STORAGE_MOVE_TYPES = ['入柜', '挪柜', '出柜'] as const
+export type StorageMoveType = (typeof STORAGE_MOVE_TYPES)[number]
+
+/** StorageMove 柜位变化记录：每次成功入柜、挪柜或出柜留痕 */
+export interface StorageMove {
+  id: string
+  specimenId: string
+  /** 变化类型 */
+  type: StorageMoveType
+  method: StorageMethod
+  /** 变化后的柜位（出柜时为出柜前所在柜位） */
+  cabinet: string
+  drawer: number
+  box: number
+  slot: number
+  /** 变化时间，ISO 字符串，便于按时间先后排序 */
+  changedAt: string
+  /** 业务日期（入柜/挪柜日期或出柜日期） */
+  changedDate: string
+  /** 经手人 */
+  handler: string
+}
