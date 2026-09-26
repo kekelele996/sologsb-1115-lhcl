@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import type { Storage, StorageMethod } from '@/types'
+import type { Storage, StorageMethod, StorageMove } from '@/types'
 import { STORAGE_METHODS } from '@/types'
 import CabinetGrid from '@/components/common/CabinetGrid'
 import StatusTag from '@/components/common/StatusTag'
@@ -7,13 +7,34 @@ import { usePersistentStore } from '@/hooks/usePersistentStore'
 import { specimenStore } from '@/stores/specimenStore'
 import { storageStore } from '@/stores/storageStore'
 import { siteStore } from '@/stores/siteStore'
-import { encodeSlot, findSlotConflicts, specimenTaxon, storageSlotText } from '@/utils/codec'
+import { encodeSlot, specimenTaxon, storageSlotText } from '@/utils/codec'
 import { uid } from '@/utils/id'
+
+const MOVE_ACTION_TEXT: Record<StorageMove['action'], string> = {
+  place: '入柜',
+  move: '换柜',
+  takeout: '出柜'
+}
+
+function formatMoveAt(occurredAt: string): string {
+  const date = new Date(occurredAt)
+  if (Number.isNaN(date.getTime())) return occurredAt
+  return new Intl.DateTimeFormat('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  }).format(date)
+}
 
 /** 保藏柜位图：柜-抽屉-盒-位三级展开，拖拽调整插位，重复占用给出提示 */
 export default function StoragePage(): JSX.Element {
   const specimens = usePersistentStore(specimenStore, (state) => state.rows)
   const storages = usePersistentStore(storageStore, (state) => state.rows)
+  const moves = usePersistentStore(storageStore, (state) => state.moves)
   const sites = usePersistentStore(siteStore, (state) => state.rows)
 
   const [cabinet, setCabinet] = useState('C01')
@@ -26,12 +47,21 @@ export default function StoragePage(): JSX.Element {
   const [dragging, setDragging] = useState<string | null>(null)
   const [message, setMessage] = useState('')
   const [warning, setWarning] = useState('')
-  const [detail, setDetail] = useState<Storage | null>(null)
+  const [detailSpecimenId, setDetailSpecimenId] = useState<string | null>(null)
 
   const codeOf = (specimenId: string): string => specimens.find((item) => item.id === specimenId)?.code ?? '未知'
   const siteName = (siteId: string): string => sites.find((site) => site.id === siteId)?.name ?? '未关联采集地'
   const placedIds = useMemo(() => new Set(storages.map((item) => item.specimenId)), [storages])
   const unplaced = specimens.filter((item) => !placedIds.has(item.id))
+  const detailCurrent = detailSpecimenId ? storages.find((item) => item.specimenId === detailSpecimenId) ?? null : null
+  const detailMoves = useMemo(
+    () => (detailSpecimenId ? moves.filter((item) => item.specimenId === detailSpecimenId) : []),
+    [moves, detailSpecimenId]
+  )
+
+  const openDetail = (storage: Storage): void => {
+    setDetailSpecimenId(storage.specimenId)
+  }
 
   const place = async (position: { cabinet: string; drawer: number; box: number; slot: number }): Promise<void> => {
     const specimenId = dragging ?? picked
@@ -39,37 +69,55 @@ export default function StoragePage(): JSX.Element {
       setWarning('请先在右侧选择或拖动一份未入柜标本')
       return
     }
+    if (!handler.trim()) {
+      setWarning('请填写经手人后再登记入柜或换柜')
+      return
+    }
+    const existing = storages.find((item) => item.specimenId === specimenId)
     const candidate: Storage = {
-      id: storages.find((item) => item.specimenId === specimenId)?.id ?? uid('stg'),
+      id: existing?.id ?? uid('stg'),
       specimenId,
-      method,
+      method: existing?.method ?? method,
       cabinet: position.cabinet,
       drawer: position.drawer,
       box: position.box,
       slot: position.slot,
-      storedDate: new Date().toISOString().slice(0, 10),
+      storedDate: existing?.storedDate ?? new Date().toISOString().slice(0, 10),
       handler: handler.trim()
     }
-    const conflicts = findSlotConflicts(storages, candidate)
-    if (conflicts.length > 0) {
+    const result = await storageStore.getState().savePlacement(candidate)
+    if (result.status === 'conflict') {
       setWarning(
         `柜位 ${encodeSlot(position.cabinet, position.drawer, position.box, position.slot)} 已被占用：` +
-          conflicts.map((item) => `${codeOf(item.specimenId)}（${item.method}）`).join('、') +
+          result.conflicts.map((item) => `${codeOf(item.specimenId)}（${item.method}）`).join('、') +
           '，请换一个插位或先出柜'
       )
       return
     }
+
     setWarning('')
-    await storageStore.getState().save(candidate)
-    setMessage(`${codeOf(specimenId)} 已入柜 ${storageSlotText(candidate)}`)
+    if (result.status === 'unchanged') {
+      setMessage(`${codeOf(specimenId)} 已在 ${storageSlotText(result.storage)}，未重复登记位置变化`)
+    } else {
+      const actionText = result.status === 'moved' ? '已换到' : '已入柜'
+      setMessage(`${codeOf(specimenId)} ${actionText} ${storageSlotText(result.storage)}`)
+    }
     setPicked('')
     setDragging(null)
   }
 
   const takeOut = async (storage: Storage): Promise<void> => {
-    await storageStore.getState().remove(storage.id)
-    setMessage(`${codeOf(storage.specimenId)} 已从 ${storageSlotText(storage)} 出柜`)
-    setDetail(null)
+    if (!handler.trim()) {
+      setWarning('请填写本次出柜经手人')
+      return
+    }
+    const result = await storageStore.getState().takeOut(storage.id, handler)
+    if (result.status !== 'takenout' || !result.storage) {
+      setWarning('当前柜位记录已变化，请刷新列表后重试')
+      return
+    }
+    setWarning('')
+    setMessage(`${codeOf(result.storage.specimenId)} 已从 ${storageSlotText(result.storage)} 出柜`)
   }
 
   return (
@@ -77,7 +125,7 @@ export default function StoragePage(): JSX.Element {
       <header>
         <h1 className="page-title">保藏柜位图</h1>
         <p className="page-sub">
-          按柜—抽屉—盒三级展开插位，空位虚线显示；拖动标本到插位即可入柜，重复占用会列出已有标本。
+          按柜—抽屉—盒三级展开插位，空位虚线显示；从未入柜列表拖入即可入柜，拖动已占用插位可换柜，重复占用会列出已有标本。
         </p>
       </header>
 
@@ -131,7 +179,8 @@ export default function StoragePage(): JSX.Element {
           codeOf={codeOf}
           draggingCode={dragging ? codeOf(dragging) : picked ? codeOf(picked) : null}
           onDropSlot={(position) => void place(position)}
-          onPickStorage={(storage) => setDetail(storage)}
+          onPickStorage={openDetail}
+          onDragStartStorage={(storage) => setDragging(storage?.specimenId ?? null)}
         />
 
         <div className="flex flex-col gap-4">
@@ -154,6 +203,16 @@ export default function StoragePage(): JSX.Element {
                   <p className="text-slate-400">
                     {siteName(specimen.siteId)} · <StatusTag status={specimen.status} />
                   </p>
+                  <button
+                    type="button"
+                    className="btn-ghost mt-2 px-2 py-1 text-[11px]"
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      setDetailSpecimenId(specimen.id)
+                    }}
+                  >
+                    插位明细
+                  </button>
                 </div>
               ))}
               {unplaced.length === 0 ? <p className="text-xs text-slate-400">所有标本都已入柜</p> : null}
@@ -165,11 +224,11 @@ export default function StoragePage(): JSX.Element {
             <ul className="mt-2 space-y-1.5 text-xs">
               {storages.map((storage) => (
                 <li key={storage.id} className="flex items-center justify-between gap-2 rounded-lg border border-slate-200 px-2 py-1.5">
-                  <span>
+                  <button type="button" className="min-w-0 text-left" onClick={() => openDetail(storage)}>
                     <span className="font-mono text-field-700">{storageSlotText(storage)}</span>
                     <span className="ml-2 text-slate-600">{codeOf(storage.specimenId)}</span>
                     <span className="ml-1 text-slate-400">{storage.method}</span>
-                  </span>
+                  </button>
                   <button className="btn-danger" type="button" onClick={() => void takeOut(storage)}>
                     出柜
                   </button>
@@ -179,17 +238,48 @@ export default function StoragePage(): JSX.Element {
             </ul>
           </div>
 
-          {detail ? (
+          {detailSpecimenId ? (
             <div className="panel">
-              <h2 className="text-sm font-semibold text-slate-700">插位明细</h2>
-              <p className="mt-1 text-xs text-slate-600">
-                柜位 {storageSlotText(detail)} · {detail.method} · 入柜日期 {detail.storedDate} · 经手人{' '}
-                {detail.handler || '—'}
-              </p>
-              <p className="text-xs text-slate-600">标本：{codeOf(detail.specimenId)}</p>
-              <button className="btn-ghost mt-2" type="button" onClick={() => setDetail(null)}>
-                关闭
-              </button>
+              <div className="flex items-start justify-between gap-2">
+                <h2 className="text-sm font-semibold text-slate-700">插位明细</h2>
+                <button className="btn-ghost px-2 py-1 text-xs" type="button" onClick={() => setDetailSpecimenId(null)}>
+                  关闭
+                </button>
+              </div>
+              <p className="mt-1 text-xs text-slate-600">标本：{codeOf(detailSpecimenId)}</p>
+              {detailCurrent ? (
+                <p className="mt-1 text-xs text-slate-600">
+                  当前柜位 <span className="font-mono text-field-700">{storageSlotText(detailCurrent)}</span> · {detailCurrent.method}
+                  {' · '}入柜日期 {detailCurrent.storedDate} · 经手人 {detailCurrent.handler || '—'}
+                </p>
+              ) : (
+                <p className="mt-1 rounded-lg bg-slate-50 px-2 py-1 text-xs text-slate-500">当前不在柜；最近位置见下方变化记录。</p>
+              )}
+
+              <h3 className="mt-3 text-xs font-semibold text-slate-600">位置变化记录（近 → 远）</h3>
+              <ol className="mt-2 space-y-2">
+                {detailMoves.map((move) => (
+                  <li key={move.id} className="rounded-lg border border-slate-200 px-2 py-2 text-xs">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-medium text-slate-700">{MOVE_ACTION_TEXT[move.action]}</span>
+                      <span className="text-slate-400">{formatMoveAt(move.occurredAt)}</span>
+                    </div>
+                    <p className="mt-1 font-mono text-field-700">
+                      {move.fromSlot ?? '—'} → {move.toSlot ?? '出柜'}
+                    </p>
+                    <p className="mt-1 text-slate-500">
+                      {move.method} · 经手人 {move.handler || '—'}
+                    </p>
+                  </li>
+                ))}
+                {detailMoves.length === 0 ? <li className="text-xs text-slate-400">暂无位置变化记录</li> : null}
+              </ol>
+
+              {detailCurrent ? (
+                <button className="btn-danger mt-3" type="button" onClick={() => void takeOut(detailCurrent)}>
+                  从当前柜位出柜
+                </button>
+              ) : null}
             </div>
           ) : null}
         </div>

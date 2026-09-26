@@ -18,3 +18,22 @@ export interface Storage {
   storedDate: string
   handler: string
 }
+
+/** 柜位变化类型 */
+export const STORAGE_MOVE_ACTIONS = ['place', 'move', 'takeout'] as const
+export type StorageMoveAction = (typeof STORAGE_MOVE_ACTIONS)[number]
+
+/** 标本柜位变化记录 */
+export interface StorageMove {
+  id: string
+  specimenId: string
+  action: StorageMoveAction
+  /** 变化前柜位；入柜时为空 */
+  fromSlot: string | null
+  /** 变化后柜位；出柜时为空 */
+  toSlot: string | null
+  method: StorageMethod
+  handler: string
+  /** ISO 时间，用于按时间排序和展示 */
+  occurredAt: string
+}

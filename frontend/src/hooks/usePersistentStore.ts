@@ -1,21 +1,23 @@
 import { useStore } from 'zustand'
 import type { StoreApi, UseBoundStore } from 'zustand'
 import Dexie, { type Table } from 'dexie'
-import type { CollectSite, Determination, Specimen, Storage } from '@/types'
+import type { CollectSite, Determination, Specimen, Storage, StorageMove } from '@/types'
+import { encodeSlot } from '@/utils/codec'
 
 /** IndexedDB 数据结构版本号 */
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 
 export interface MetaRow {
   key: string
   value: number
 }
 
-/** Dexie 封装：标本 / 采集地 / 保藏位置 / 鉴定记录 四张业务表 + 元数据表 */
+/** Dexie 封装：标本 / 采集地 / 保藏位置 / 柜位变化 / 鉴定记录 五张业务表 + 元数据表 */
 class InsectLogDb extends Dexie {
   specimens!: Table<Specimen, string>
   sites!: Table<CollectSite, string>
   storages!: Table<Storage, string>
+  storageMoves!: Table<StorageMove, string>
   determinations!: Table<Determination, string>
   meta!: Table<MetaRow, string>
 
@@ -29,7 +31,7 @@ class InsectLogDb extends Dexie {
       meta: 'key'
     })
     // v2：新增「采集方式」字段，迁移时为历史标本补齐默认采集方式（扫网）
-    this.version(SCHEMA_VERSION)
+    this.version(2)
       .stores({
         specimens: 'id, code, order, family, status, siteId, collectDate',
         sites: 'id, code, name, habitat',
@@ -46,6 +48,26 @@ class InsectLogDb extends Dexie {
               specimen.method = '扫网'
             }
           })
+      })
+    // v3：新增柜位变化表，并为已有当前柜位补一条初始入柜记录
+    this.version(SCHEMA_VERSION)
+      .stores({
+        storageMoves: 'id, specimenId, action, occurredAt'
+      })
+      .upgrade(async (tx) => {
+        const moves = await tx.table<Storage, string>('storages').toArray()
+        await tx.table<StorageMove, string>('storageMoves').bulkPut(
+          moves.map((storage) => ({
+            id: `move_seed_${storage.id}`,
+            specimenId: storage.specimenId,
+            action: 'place',
+            fromSlot: null,
+            toSlot: encodeSlot(storage.cabinet, storage.drawer, storage.box, storage.slot),
+            method: storage.method,
+            handler: storage.handler,
+            occurredAt: new Date(`${storage.storedDate}T00:00:00`).toISOString()
+          }))
+        )
       })
   }
 }
@@ -260,6 +282,30 @@ export async function seedDemoData(): Promise<void> {
       slot: 5,
       storedDate: today,
       handler: '覃羽'
+    }
+  ])
+
+  const seededAt = new Date(`${today}T09:00:00`).toISOString()
+  await db.storageMoves.bulkPut([
+    {
+      id: 'move_seed_stg_001',
+      specimenId: 'sp_001',
+      action: 'place',
+      fromSlot: null,
+      toSlot: 'C01-D1-B02-S03',
+      method: '针插',
+      handler: '覃羽',
+      occurredAt: seededAt
+    },
+    {
+      id: 'move_seed_stg_002',
+      specimenId: 'sp_002',
+      action: 'place',
+      fromSlot: null,
+      toSlot: 'C01-D1-B02-S05',
+      method: '针插',
+      handler: '覃羽',
+      occurredAt: seededAt
     }
   ])
 }

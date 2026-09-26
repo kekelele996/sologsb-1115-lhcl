@@ -81,6 +81,11 @@ export function findSlotConflicts(storages: Storage[], target: Storage): Storage
   return storages.filter((item) => item.id !== target.id && storageSlotText(item) === key)
 }
 
+/** 判断两条保藏记录是否为同一柜位 */
+export function isSameSlot(left: Storage, right: Storage): boolean {
+  return storageSlotText(left) === storageSlotText(right)
+}
+
 /** 标本摘要文本 */
 export function specimenTaxon(specimen: Specimen): string {
   const parts = [specimen.order, specimen.family, specimen.genus, specimen.species].filter(Boolean)

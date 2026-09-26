@@ -15,6 +15,7 @@ export interface CabinetGridProps {
   /** 点击或拖放到某个插位 */
   onDropSlot: (payload: { cabinet: string; drawer: number; box: number; slot: number }) => void
   onPickStorage?: (storage: Storage) => void
+  onDragStartStorage?: (storage: Storage | null) => void
   footer?: ReactNode
 }
 
@@ -29,6 +30,7 @@ export default function CabinetGrid({
   draggingCode,
   onDropSlot,
   onPickStorage,
+  onDragStartStorage,
   footer
 }: CabinetGridProps): JSX.Element {
   const drawerList = Array.from({ length: drawers }, (_, index) => index + 1)
@@ -65,10 +67,17 @@ export default function CabinetGrid({
                       <button
                         key={slot}
                         type="button"
+                        draggable={Boolean(storage)}
                         title={storage ? `占用：${code}` : '空位'}
                         onClick={() =>
                           storage && onPickStorage ? onPickStorage(storage) : onDropSlot({ cabinet, drawer, box, slot })
                         }
+                        onDragStart={(event) => {
+                          if (!storage) return
+                          event.dataTransfer.effectAllowed = 'move'
+                          onDragStartStorage?.(storage)
+                        }}
+                        onDragEnd={() => onDragStartStorage?.(null)}
                         onDragOver={(event) => event.preventDefault()}
                         onDrop={(event) => {
                           event.preventDefault()
